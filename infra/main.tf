@@ -146,6 +146,11 @@ resource "aws_glue_connection" "glue_connection" {
 ###    GLUE JOB      ###
 ########################
 
+resource "aws_glue_catalog_database" "glue_db" {
+  name = "tech_challenge"
+  description = "Banco de dados para dados refinados da B3"
+  location_uri = "s3://prod-sa-east-1-bovespa-refined/"
+}
 
 resource "aws_glue_job" "etl_job" {
   name              = var.glue_job_data_prep
@@ -264,7 +269,12 @@ resource "aws_iam_role_policy" "glue_job_s3_access" {
           "ec2:DescribeRouteTables",
           "ec2:DescribeVpcEndpoints",
           "ec2:Describe*",
-          "ec2:CreateTags"
+          "ec2:CreateTags",
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+
         ]
         Resource = "*"
       }]
