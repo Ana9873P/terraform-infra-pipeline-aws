@@ -11,7 +11,7 @@ from awsglue.transforms import *
 from awsglue.dynamicframe import DynamicFrame
 from awsglue.utils import getResolvedOptions
 from awsglue.job import Job
-from pyspark.sql.functions import year, month, dayofmonth,to_date,regexp_replace,col,current_date,col, sum, avg,to_date, lag, datediff,when,lpad, lit
+from pyspark.sql.functions import year, month, dayofmonth,to_date,regexp_replace,col,current_date,col, sum, avg,to_date, lag, datediff,when,lpad, lit,substring
 from pyspark.sql.window import Window
 import re
 import boto3
@@ -82,8 +82,10 @@ class JobELTB3:
             print(f"[write_parquet_to_s3] Erro na gravação dos dados : {e}")
             raise
 
-    def update_glue_catalog(self, df):
+    def update_glue_catalog(self, df,table_name=None):
       try:
+          
+          tbl_name = table_name if table_name else self.output_table_name
           refined_table_location = self.get_table_location(self.database_name, self.output_table_name)
           spark = self.glueContext.spark_session
           spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
@@ -98,8 +100,8 @@ class JobELTB3:
           .format("parquet") \
           .partitionBy("ano", "mes", "dia", "data_pregao") \
           .option("path", refined_table_location) \
-          .saveAsTable(f"{self.database_name}.{self.output_table_name}") 
-          print(f"Data saved to '{refined_table_location}' and catalog '{self.database_name}.{self.output_table_name}' updated successfully.")
+          .saveAsTable(f"{self.database_name}.{tbl_name}") 
+          print(f"Data saved to '{refined_table_location}' and catalog '{self.database_name}.{tbl_name}' updated successfully.")
 
       except Exception as e:
           print(f"[update_glue_catalog] Error overwriting data and updating catalog: {e}")
@@ -160,7 +162,7 @@ class JobELTB3:
             print(f"Erro na etapa de tratamento do dataframe: {e}")
             raise
 
-        def agrupar_faixa_teorica_qtde(self,df):
+    def agrupar_faixa_teorica_qtde(self,df):
             """
             Agrupa ações em faixas de Qtde. Teórica.
             
@@ -188,14 +190,18 @@ class JobELTB3:
         - Soma de Part (%)
         - Média de Part (%)
         """
+        print("Realizando sumarização dos dados por 'Tipo' e 'data_pregao' ...")
+        df = df.withColumn("ano", substring(col("data_pregao").cast("string"), 1, 4)) \
+                .withColumn("mes", substring(col("data_pregao").cast("string"), 6, 2)) \
+                .withColumn("dia", substring(col("data_pregao").cast("string"), 9, 2))
+            
         # Aplica agregações
-        print("Realizando sumarização dos dados por 'Tipo' ...")
-        sumarizacao = df.groupBy("nome_tipo_acao").agg(
+        sumarizacao = df.groupBy("data_pregao", "nome_tipo_acao", "ano", "mes", "dia").agg(
             sum("quantidade_teorica").alias("total_quantidade_teorica"),
             avg("quantidade_teorica").alias("media_quantidade_teorica"),
             sum("percentual_participacao_acao").alias("total_percentual_participacao_acao"),
             avg("percentual_participacao_acao").alias("media_percentual_participacao_acao")
-            )   
+            ) 
              
         return sumarizacao
 
@@ -231,11 +237,26 @@ class JobELTB3:
         try:
             df_full_b3 = self.read_parquet_from_s3()
             df_full_b3 = self.adicionar_data_pregao(df_full_b3)
-            df_full_b3 = self.transform_dataframe(df_full_b3)
-            #self.write_parquet_to_s3(df_full_b3)
-            df_full_b3.show()
-            # O método update_glue_catalog não precisa mais do dataframe
+            df_full_b3 = self.transform_dataframe(df_full_b3)            
+            df_full_b3_teorica_qtde = self.agrupar_faixa_teorica_qtde(df_full_b3)
+            df_full_b3_sumarizacao_tipo = self.sumarizacao_tipo(df_full_b3)
+            df_full_b3_wd_variacoes_diarias = self.window_variacoes_diarias(df_full_b3)
+            df_full_b3_wd_media_movel = self.window_media_movel(df_full_b3, periodo=3)
+
+            print("Exibindo agrupa ações em faixas de Qtde. Teórica.") 
+            df_full_b3_teorica_qtde.show(4,truncate=False,vertical=True)
+            print("Exibindo sumarização dos dados por 'Tipo'.")
+            df_full_b3_sumarizacao_tipo.show(4,truncate=False,vertical=True)
+            print("Exibindo variações diárias.")
+            df_full_b3_wd_variacoes_diarias.show(4,truncate=False,vertical=True)
+            print("Exibindo média móvel de 3 dias.")
+            df_full_b3_wd_media_movel.show(4,truncate=False,vertical=True)
+
             self.update_glue_catalog(df_full_b3)
+            self.update_glue_catalog(df_full_b3_teorica_qtde,table_name="b3_faixa_teorica_qtde")
+            self.update_glue_catalog(df_full_b3_sumarizacao_tipo,table_name="b3_sumarizacao_tipo")
+            self.update_glue_catalog(df_full_b3_wd_variacoes_diarias,table_name="b3_wd_variacoes_diarias")
+            self.update_glue_catalog(df_full_b3_wd_media_movel,table_name="b3_wd_media_movel")
 
         except Exception as e:
             print(f"Erro ao executar o job: {e}")
